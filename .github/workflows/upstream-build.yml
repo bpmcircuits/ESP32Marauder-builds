@@ -154,8 +154,7 @@ jobs:
           sketch-names-find-start: source
           arduino-board-fqbn: esp32:esp32:esp32s2
           arduino-platform: esp32:esp32@${{ matrix.board.idf_ver }}
-          platform-url: https://github.com/espressif/arduino-esp32/releases/download/${{ matrix.board.idf_ver 
-}}/package_esp32_dev_index.json
+          platform-url: https://github.com/espressif/arduino-esp32/releases/download/${{ matrix.board.idf_ver }}/package_esp32_dev_index.json
 
       - name: Install ESP32Ping
         uses: actions/checkout@v4
@@ -294,8 +293,7 @@ jobs:
           arduino-board-fqbn: ${{ matrix.board.fbqn }}
           extra-arduino-cli-args: "--warnings none --build-property compiler.cpp.extra_flags='-D${{ matrix.board.flag }}'"
           arduino-platform: esp32:esp32@${{ matrix.board.idf_ver }}
-          platform-url: https://github.com/espressif/arduino-esp32/releases/download/${{ matrix.board.idf_ver 
-}}/package_esp32_dev_index.json
+          platform-url: https://github.com/espressif/arduino-esp32/releases/download/${{ matrix.board.idf_ver }}/package_esp32_dev_index.json
 
       - name: Rename binary
         id: binary
@@ -397,8 +395,7 @@ jobs:
           - Feberis
           - Feberis Pro
 
-          This is a prerelease intended for hardware testing. Publish the final release only after both binaries have been 
-verified.
+          This is a prerelease intended for hardware testing. Publish the final release only after both binaries have been verified.
           EOF
 
           gh release create "$CANDIDATE_TAG" dist/* \
