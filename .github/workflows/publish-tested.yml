@@ -1,0 +1,131 @@
+name: Publish tested Feberis release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Final upstream version/tag, e.g. v1.15.1"
+        required: true
+        type: string
+      delete_candidate:
+        description: "Delete test prerelease after successful publication"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: feberis-final-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.version }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ inputs.version }}
+      CANDIDATE_TAG: test-${{ inputs.version }}
+
+    steps:
+      - name: Validate candidate and final release state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Final release $VERSION already exists. Refusing to overwrite it." >&2
+            exit 1
+          fi
+
+          gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+
+          IS_PRERELEASE=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/releases/tags/${CANDIDATE_TAG}" \
+            --jq '.prerelease')
+
+          if [[ "$IS_PRERELEASE" != "true" ]]; then
+            echo "$CANDIDATE_TAG exists but is not marked as a prerelease." >&2
+            exit 1
+          fi
+
+      - name: Download exact tested assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gh release download "$CANDIDATE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir dist
+          ls -lah dist
+
+      - name: Verify files and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FEberis_COUNT=$(find dist -maxdepth 1 -type f -name '*_feberis.bin' | wc -l)
+          PRO_COUNT=$(find dist -maxdepth 1 -type f -name '*_feberis_pro.bin' | wc -l)
+
+          [[ "$FEberis_COUNT" -eq 1 ]] || { echo "Expected exactly one Feberis binary" >&2; exit 1; }
+          [[ "$PRO_COUNT" -eq 1 ]] || { echo "Expected exactly one Feberis Pro binary" >&2; exit 1; }
+          test -f dist/SHA256SUMS.txt
+          test -f dist/BUILD_INFO.txt
+
+          (
+            cd dist
+            sha256sum -c SHA256SUMS.txt
+          )
+
+      - name: Create final release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          UPSTREAM_SHA=$(sed -n 's/^Upstream commit: //p' dist/BUILD_INFO.txt)
+          UPSTREAM_TAG=$(sed -n 's/^Upstream tag: //p' dist/BUILD_INFO.txt)
+
+          [[ "$UPSTREAM_TAG" == "$VERSION" ]] || {
+            echo "Candidate was built from $UPSTREAM_TAG, but requested final version is $VERSION" >&2
+            exit 1
+          }
+
+          cat > release-notes.md <<EOF
+          BPM Circuits ESP32Marauder build based on upstream **${UPSTREAM_TAG}**.
+
+          Upstream project: https://github.com/justcallmekoko/ESP32Marauder
+          Upstream commit: \`${UPSTREAM_SHA}\`
+
+          Builds included:
+          - **Feberis** (`BPMCIRCUITS_FEBERIS`)
+          - **Feberis Pro** (`BPMCIRCUITS_FEBERIS_PRO`)
+
+          Feberis Pro GPS configuration: UART1, TX GPIO14, RX GPIO13.
+
+          These are the exact binary files from the tested prerelease `${CANDIDATE_TAG}`; they are not rebuilt during 
+publication.
+          EOF
+
+      - name: Publish final release
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --latest \
+            --notes-file release-notes.md
+
+      - name: Optionally remove candidate prerelease
+        if: inputs.delete_candidate == true
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release delete "$CANDIDATE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --cleanup-tag \
+            --yes
+

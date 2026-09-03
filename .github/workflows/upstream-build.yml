@@ -1,0 +1,409 @@
+name: Build Feberis from upstream release
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Optional upstream tag, e.g. v1.15.1. Empty = latest stable release"
+        required: false
+        type: string
+      force:
+        description: "Rebuild/replace existing test candidate (never overwrites a final release)"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: feberis-upstream-release-build
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: justcallmekoko/ESP32Marauder
+
+jobs:
+  detect:
+    name: Detect upstream release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.detect.outputs.tag }}
+      upstream_sha: ${{ steps.detect.outputs.upstream_sha }}
+      candidate_tag: ${{ steps.detect.outputs.candidate_tag }}
+      should_build: ${{ steps.detect.outputs.should_build }}
+    steps:
+      - name: Resolve release and check local releases
+        id: detect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MANUAL_TAG: ${{ inputs.upstream_tag }}
+          FORCE_BUILD: ${{ inputs.force }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${MANUAL_TAG:-}" ]]; then
+            TAG="$MANUAL_TAG"
+            # Fail early if the requested upstream tag/ref does not exist.
+            gh api "repos/${UPSTREAM_REPO}/commits/${TAG}" >/dev/null
+          else
+            TAG=$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq '.tag_name')
+          fi
+
+          UPSTREAM_SHA=$(gh api "repos/${UPSTREAM_REPO}/commits/${TAG}" --jq '.sha')
+          CANDIDATE_TAG="test-${TAG}"
+
+          SHOULD_BUILD=true
+
+          # Never replace an already published final release automatically.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Final release $TAG already exists in $GITHUB_REPOSITORY. Nothing to do."
+            SHOULD_BUILD=false
+          elif gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+               && [[ "${FORCE_BUILD:-false}" != "true" ]]; then
+            echo "Test candidate $CANDIDATE_TAG already exists. Use force=true to rebuild it."
+            SHOULD_BUILD=false
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "upstream_sha=$UPSTREAM_SHA" >> "$GITHUB_OUTPUT"
+          echo "candidate_tag=$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD_BUILD" >> "$GITHUB_OUTPUT"
+
+          echo "Upstream tag: $TAG"
+          echo "Upstream SHA: $UPSTREAM_SHA"
+          echo "Candidate tag: $CANDIDATE_TAG"
+          echo "Should build: $SHOULD_BUILD"
+
+  compile:
+    name: Build ${{ matrix.board.name }}
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board:
+          - name: Feberis
+            flag: BPMCIRCUITS_FEBERIS
+            fbqn: esp32:esp32:d32:PartitionScheme=min_spiffs
+            file_name: feberis
+            build_dir: d32
+            idf_ver: 3.3.4
+            nimble_ver: 2.3.8
+          - name: Feberis Pro
+            flag: BPMCIRCUITS_FEBERIS_PRO
+            fbqn: esp32:esp32:d32:PartitionScheme=min_spiffs
+            file_name: feberis_pro
+            build_dir: d32
+            idf_ver: 3.3.4
+            nimble_ver: 2.3.8
+
+    steps:
+      # First fetch only our automation files. The actual firmware source comes
+      # from the exact upstream release tag below.
+      - name: Checkout BPM automation
+        uses: actions/checkout@v4
+        with:
+          path: automation
+
+      - name: Checkout exact upstream release
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ needs.detect.outputs.tag }}
+          path: source
+          fetch-depth: 1
+
+      - name: Verify upstream commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA=$(git -C source rev-parse HEAD)
+          EXPECTED_SHA='${{ needs.detect.outputs.upstream_sha }}'
+          echo "Expected: $EXPECTED_SHA"
+          echo "Actual:   $ACTUAL_SHA"
+          [[ "$ACTUAL_SHA" == "$EXPECTED_SHA" ]]
+
+      - name: Patch configs.h for Feberis targets
+        run: python3 automation/scripts/patch_configs.py source/esp32_marauder/configs.h
+
+      - name: Show patched configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -n -C 2 'BPMCIRCUITS_FEBERIS' source/esp32_marauder/configs.h
+
+      - name: Install Arduino CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+          echo "$GITHUB_WORKSPACE/bin" >> "$GITHUB_PATH"
+          "$GITHUB_WORKSPACE/bin/arduino-cli" version
+
+      # This mirrors the current upstream build setup. TestFile forces the
+      # requested ESP32 Arduino core to be installed before we patch platform.txt.
+      - name: Build TestFile with ESP32 core ${{ matrix.board.idf_ver }}
+        uses: ArminJo/arduino-test-compile@v3.2.1
+        with:
+          sketch-names: TestFile.ino
+          sketch-names-find-start: source
+          arduino-board-fqbn: esp32:esp32:esp32s2
+          arduino-platform: esp32:esp32@${{ matrix.board.idf_ver }}
+          platform-url: https://github.com/espressif/arduino-esp32/releases/download/${{ matrix.board.idf_ver 
+}}/package_esp32_dev_index.json
+
+      - name: Install ESP32Ping
+        uses: actions/checkout@v4
+        with:
+          repository: marian-craciunescu/ESP32Ping
+          ref: "1.6"
+          path: CustomESP32Ping
+
+      - name: Install AsyncTCP
+        uses: actions/checkout@v4
+        with:
+          repository: ESP32Async/AsyncTCP
+          ref: v3.4.8
+          path: CustomAsyncTCP
+
+      - name: Install MicroNMEA
+        uses: actions/checkout@v4
+        with:
+          repository: stevemarple/MicroNMEA
+          ref: v2.0.6
+          path: CustomMicroNMEA
+
+      - name: Install ESPAsyncWebServer
+        uses: actions/checkout@v4
+        with:
+          repository: ESP32Async/ESPAsyncWebServer
+          ref: v3.8.1
+          path: CustomESPAsyncWebServer
+
+      - name: Install TFT_eSPI
+        uses: actions/checkout@v4
+        with:
+          repository: Bodmer/TFT_eSPI
+          ref: V2.5.34
+          path: CustomTFT_eSPI
+
+      - name: Install XPT2046_Touchscreen
+        uses: actions/checkout@v4
+        with:
+          repository: PaulStoffregen/XPT2046_Touchscreen
+          ref: v1.4
+          path: CustomXPT2046_Touchscreen
+
+      - name: Install lv_arduino
+        uses: actions/checkout@v4
+        with:
+          repository: lvgl/lv_arduino
+          ref: 3.0.0
+          path: Customlv_arduino
+
+      - name: Install JPEGDecoder
+        uses: actions/checkout@v4
+        with:
+          repository: Bodmer/JPEGDecoder
+          ref: "1.8.0"
+          path: CustomJPEGDecoder
+
+      - name: Install NimBLE-Arduino
+        uses: actions/checkout@v4
+        with:
+          repository: h2zero/NimBLE-Arduino
+          ref: ${{ matrix.board.nimble_ver }}
+          path: CustomNimBLE-Arduino
+
+      - name: Install Adafruit_NeoPixel
+        uses: actions/checkout@v4
+        with:
+          repository: adafruit/Adafruit_NeoPixel
+          ref: 1.12.0
+          path: CustomAdafruit_NeoPixel
+
+      - name: Install ArduinoJson
+        uses: actions/checkout@v4
+        with:
+          repository: bblanchon/ArduinoJson
+          ref: v6.18.2
+          path: CustomArduinoJson
+
+      - name: Install LinkedList
+        uses: actions/checkout@v4
+        with:
+          repository: ivanseidel/LinkedList
+          ref: v1.3.3
+          path: CustomLinkedList
+
+      - name: Install EspSoftwareSerial
+        uses: actions/checkout@v4
+        with:
+          repository: plerup/espsoftwareserial
+          ref: 8.1.0
+          path: CustomEspSoftwareSerial
+
+      - name: Install Adafruit_BusIO
+        uses: actions/checkout@v4
+        with:
+          repository: adafruit/Adafruit_BusIO
+          ref: 1.15.0
+          path: CustomAdafruit_BusIO
+
+      - name: Install Adafruit_MAX1704X
+        uses: actions/checkout@v4
+        with:
+          repository: adafruit/Adafruit_MAX1704X
+          ref: 1.0.2
+          path: CustomAdafruit_MAX1704X
+
+      - name: Install bundled Adafruit_TCA8418
+        run: cp -r source/libraries/Adafruit_TCA8418 CustomAdafruit_TCA8418
+
+      - name: Configure TFT_eSPI library files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f CustomTFT_eSPI/User_Setup_Select.h
+          cp source/User*.h CustomTFT_eSPI/
+
+      - name: Install esptool
+        run: python3 -m pip install --disable-pip-version-check esptool
+
+      - name: Patch ESP32 platform linker flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in $(find "$HOME/.arduino15/packages/esp32/hardware/esp32/" -name platform.txt); do
+            sed -i 's/compiler.c.elf.extra_flags=/compiler.c.elf.extra_flags=-Wl,-zmuldefs /' "$i"
+          done
+          for f in $(find "$HOME/.arduino15/packages/esp32/tools/esp32-arduino-libs/" -name cpp_flags); do
+            sed -i 's/-fexceptions/-fno-exceptions/g' "$f"
+          done
+
+      - name: Build Marauder for ${{ matrix.board.name }}
+        uses: ArminJo/arduino-test-compile@v3.3.0
+        with:
+          sketch-names: esp32_marauder.ino
+          sketch-names-find-start: source
+          arduino-board-fqbn: ${{ matrix.board.fbqn }}
+          extra-arduino-cli-args: "--warnings none --build-property compiler.cpp.extra_flags='-D${{ matrix.board.flag }}'"
+          arduino-platform: esp32:esp32@${{ matrix.board.idf_ver }}
+          platform-url: https://github.com/espressif/arduino-esp32/releases/download/${{ matrix.board.idf_ver 
+}}/package_esp32_dev_index.json
+
+      - name: Rename binary
+        id: binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(grep '#define MARAUDER_VERSION' source/esp32_marauder/configs.h \
+            | sed -E 's/.*"v([^"]+)"/v\1/' | tr '.' '_')
+          DATE=$(date -u +%Y%m%d)
+          BUILD_DIR="source/esp32_marauder/build/esp32.esp32.${{ matrix.board.build_dir }}"
+          INPUT_BIN="$BUILD_DIR/esp32_marauder.ino.bin"
+          OUTPUT_BIN="esp32_marauder_${VERSION}_${DATE}_${{ matrix.board.file_name }}.bin"
+
+          test -f "$INPUT_BIN"
+          mv "$INPUT_BIN" "$BUILD_DIR/$OUTPUT_BIN"
+
+          echo "artifact_name=$OUTPUT_BIN" >> "$GITHUB_OUTPUT"
+          echo "artifact_path=$BUILD_DIR/$OUTPUT_BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Upload test binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.binary.outputs.artifact_name }}
+          path: ${{ steps.binary.outputs.artifact_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+  candidate:
+    name: Create test prerelease
+    needs: [detect, compile]
+    if: needs.detect.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download compiled binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Validate and create metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FEberis_COUNT=$(find dist -maxdepth 1 -type f -name '*_feberis.bin' | wc -l)
+          PRO_COUNT=$(find dist -maxdepth 1 -type f -name '*_feberis_pro.bin' | wc -l)
+          [[ "$FEberis_COUNT" -eq 1 ]]
+          [[ "$PRO_COUNT" -eq 1 ]]
+
+          (
+            cd dist
+            sha256sum *.bin > SHA256SUMS.txt
+          )
+
+          cat > dist/BUILD_INFO.txt <<EOF
+          Upstream repository: https://github.com/${UPSTREAM_REPO}
+          Upstream tag: ${{ needs.detect.outputs.tag }}
+          Upstream commit: ${{ needs.detect.outputs.upstream_sha }}
+          Builder repository: https://github.com/${GITHUB_REPOSITORY}
+          Builder commit: ${GITHUB_SHA}
+
+          Custom targets:
+          - BPMCIRCUITS_FEBERIS -> Feberis
+          - BPMCIRCUITS_FEBERIS_PRO -> Feberis Pro
+          - Feberis Pro GPS: UART1, TX=14, RX=13
+          EOF
+
+          cat dist/SHA256SUMS.txt
+
+      - name: Replace existing candidate when force rebuild was requested
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ needs.detect.outputs.candidate_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "$CANDIDATE_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+
+      - name: Create candidate prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_TAG: ${{ needs.detect.outputs.candidate_tag }}
+          UPSTREAM_TAG: ${{ needs.detect.outputs.tag }}
+          UPSTREAM_SHA: ${{ needs.detect.outputs.upstream_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > release-notes.md <<EOF
+          Automated **test build** for BPM Circuits hardware, based on upstream ESP32Marauder **${UPSTREAM_TAG}**.
+
+          Upstream commit: \`${UPSTREAM_SHA}\`
+
+          Included builds:
+          - Feberis
+          - Feberis Pro
+
+          This is a prerelease intended for hardware testing. Publish the final release only after both binaries have been 
+verified.
+          EOF
+
+          gh release create "$CANDIDATE_TAG" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "Feberis test build ${UPSTREAM_TAG}" \
+            --notes-file release-notes.md
