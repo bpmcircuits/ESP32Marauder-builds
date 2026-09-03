@@ -104,8 +104,7 @@ jobs:
 
           Feberis Pro GPS configuration: UART1, TX GPIO14, RX GPIO13.
 
-          These are the exact binary files from the tested prerelease `${CANDIDATE_TAG}`; they are not rebuilt during 
-publication.
+          These are the exact binary files from the tested prerelease `${CANDIDATE_TAG}`; they are not rebuilt during publication.
           EOF
 
       - name: Publish final release
