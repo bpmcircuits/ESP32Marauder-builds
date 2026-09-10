@@ -64,7 +64,7 @@ BOARD_FEATURES = """  #ifdef BPMCIRCUITS_FEBERIS
 
 GPS_CONFIG = """    #elif defined(BPMCIRCUITS_FEBERIS_PRO)
       #define GPS_SERIAL_INDEX 1
-      #define GPS_TX 14
+      #define GPS_TX 4
       #define GPS_RX 13
 """
 
