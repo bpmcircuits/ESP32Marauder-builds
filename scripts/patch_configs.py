@@ -87,7 +87,7 @@ def validate(text: str) -> None:
         '#define HARDWARE_NAME "Feberis Pro"',
         "#ifdef BPMCIRCUITS_FEBERIS",
         "#ifdef BPMCIRCUITS_FEBERIS_PRO",
-        "#elif defined(BPMCIRCUITS_FEBERIS_PRO)\n      #define GPS_SERIAL_INDEX 1\n      #define GPS_TX 14\n      #define GPS_RX 13",
+        "#elif defined(BPMCIRCUITS_FEBERIS_PRO)\n      #define GPS_SERIAL_INDEX 1\n      #define GPS_TX 4\n      #define GPS_RX 13",
     ]
     missing = [item for item in required if item not in text]
     if missing:
